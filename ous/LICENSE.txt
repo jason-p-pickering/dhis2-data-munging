@@ -1,0 +1,5 @@
+Original data obtained from 
+http://thematicmapping.org/downloads/world_borders.php
+
+Liscened under 
+http://creativecommons.org/licenses/by-sa/3.0/
