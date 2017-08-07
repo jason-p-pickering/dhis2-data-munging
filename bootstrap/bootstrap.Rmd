@@ -1,0 +1,437 @@
+---
+title: "Bootstrapping DHIS2"
+author: "Jason Pickering"
+date: "August 6, 2017"
+output:
+  slidy_presentation: default
+  ioslides_presentation: default
+  beamer_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+## Introduction
+- In general, bootstrapping usually refers to a self-starting process that is supposed to proceed without external input.[^1]
+- When initally setting up a DHIS2 system, we often need to transform and import (meta)data from external data sources.
+- This process should be scripted, repeatable, and testable. 
+
+
+[^1]: https://en.wikipedia.org/wiki/Bootstrapping
+
+
+## Choice of tools
+
+- R: Easy to learn scripting language well suited for data munging. 
+- Python: Powerful, standard language with many useful tools when  working with data.
+- Node.JS: Great tool for those who already know JavaScript.
+- ETL tools (Pentaho, Talend, etc) 
+- Bash 
+- SQL: May be useful for transforming large datasets or if you know SQL.
+- Most important consideration is to choose the right tool for the task.
+
+
+## General approach to bootstrapping
+- Create metadata from existing sources
+- Create metadata specific to DHIS2
+- Metadata often needs to be cleaned prior to import
+- Import, transform, shape and merge existing data with metadata
+
+## Goal for this excercise
+-  Bootstrap a DHIS2 system with Global TB data in under 2 minutes and 30 seconds!
+-  If you do not know R, don't worry. Focus on **WHAT** is happening and how you could do it.
+-  Do not forget about repetability and testability.
+- Download and install R and Rstudio if you would like to follow along or repeat the bootstrap.
+
+
+## Let's get started
+
+```{r , echo = TRUE, results='hold',message=FALSE}
+require(httr)
+require(jsonlite)
+require(assertthat)
+require(rlist)
+require(reshape2)
+require(ggplot2)
+```
+
+We will load a few helpful libraries
+
+* httr: High-level library for interacting with a server over HTTP 
+    + NodeJs = http
+* jsonlite: Interact with JSON resources.  
+    + NodeJS = JSON 
+* assertthat: A simple assertion library for testing. 
+    + NodeJS = assert
+* rlist: A useful library for manipulating lists.
+* reshape: Data munging library for reshaping data. 
+* ggplot2: Handy library for making graphs.
+
+## UID generation
+
+```{r echo = TRUE}
+generateUID <- function(codeSize = 11) {
+  #Generate a random seed
+  runif(1)
+  allowedLetters <- c(LETTERS, letters)
+  allowedChars <- c(LETTERS, letters, 0:9)
+  #First character must be a letter according to the DHIS2 spec
+  firstChar <- sample(allowedLetters, 1)
+  otherChars <- sample(allowedChars, codeSize - 1)
+  uid <- paste(c(firstChar,paste(
+  otherChars, sep = "", collapse = "" )), sep = "", collapse = "")
+  return(uid)
+}
+```
+
+
+- DHIS2 can generate a `uid` like **`r generateUID()`**  for you at `api/system/id`
+- They are just 11 character strings which begin with a letter
+- Only letters and numbers are allowed
+
+
+## Logging in
+
+- We assume you have setup a totally clean instance of DHIS2 up and running.
+- Lets try and login. 
+
+```{r echo = TRUE}
+
+startTime<-Sys.time()
+
+setwd("/home/jason/development/dhis2-data-munging/")
+baseurl<-"http://localhost:8080/dhis/"
+username<-"admin"
+password<-"district"
+#This will give us a cookie we can use for later use. 
+
+loginDHIS2<-function(baseurl,username,password) {
+url<-paste0(baseurl,"api/me")
+r<-GET(url,authenticate(username,password))
+assert_that(r$status_code == 200L) }
+
+loginDHIS2(baseurl,username,password)
+```
+
+
+- Looks like `admin:district` worked, so lets proceed.
+- You can adjust `setwd` to a directory on your machine. 
+
+
+## Loading our organisation units
+
+```{r echo=TRUE}
+#Get the OUS
+ous<-fromJSON("https://raw.githubusercontent.com/jason-p-pickering/dhis2-data-munging/master/ous/ous.json")
+#Create the URL
+url<-paste0(baseurl,"api/27/metadata?importStrategy=CREATE&atomicMode=NONE")
+#Post to the metadata API as JSON
+r<-POST(url,body=toJSON(ous,auto_unbox = TRUE),content_type_json())
+assert_that(r$status_code == 200L)
+```
+
+-  We load up a file of [country boundaries](https://github.com/jason-p-pickering/dhis2-data-munging/blob/master/ous/ous.json) as JSON.
+- `POST` this to the metadata API, turning off `atomicMode` for now. 
+-  We should get an HTTP 200 code if things went well.
+-  Consult the [docs](https://docs.dhis2.org/master/en/developer/html/webapi_metadata_crud.html#webapi_metadata_create_update) for details.
+
+## Testing our organisation units are there
+
+``` {r echo = TRUE}
+#Request all of the orgunit IDs from the server
+url<-paste0(baseurl,"/api/organisationUnits?fields=id&paging=false")
+ous_from_server<-fromJSON(content(GET(url),"text"))
+```
+
+- We should have our organisation units in now. 
+- Lets be sure that they are acutally there by asking the API for them and testing against out file.
+
+``` {r echo = TRUE }
+assert_that(all.equal(sort(ous$organisationUnits$id) , 
+                      sort(ous_from_server$organisationUnits$id)))
+```
+
+## Setting organisation unit levels
+
+- We should set some organisation unit levels, otherwise, the system will complain
+
+```{r echo = TRUE }
+
+organisationUnitLevels<-data.frame(level=c(1,2,3),
+                                   name=c("Global","Continent","Country"))
+#Generate some UIDs
+organisationUnitLevels$uid<-sapply(rep(11,nrow(organisationUnitLevels)),generateUID)
+url<-paste0(baseurl,"api/27/metadata?importStrategy=CREATE&atomicMode=NONE")
+#Post to the metadata API as JSON
+r<-POST(url,body=toJSON(list(organisationUnitLevels = organisationUnitLevels),
+                        auto_unbox = TRUE),
+                        content_type_json())
+assert_that(r$status_code == 200L)
+```
+
+- That seems to have worked!
+
+## Set your user's organisation unit
+
+- We need to set the organisation unit of our user, otherwise, the system will complain. 
+- We can get our current user information, and assign it to the `Global` organisation unit.
+- After that, `POST` the metadata back and request that it be updated.
+
+```{r echo = TRUE }
+
+#We want to be a global user
+url<-paste0(baseurl,"/api/organisationUnits?filter=name:eq:Global&fields=id")
+global_uid<-fromJSON(content(GET(url),"text"))
+url<-paste0(baseurl,"api/me")
+me<-fromJSON(content(GET(url),"text"))
+url<-paste0(baseurl,"api/users/",me$id)
+me<-fromJSON(content(GET(url),"text"))
+me$organisationUnits<-list(list(id = global_uid$organisationUnits$id))
+url<-paste0(baseurl,"api/27/metadata?importStrategy=UPDATE")
+r<-POST(url,body=toJSON(list(users=list(me)),auto_unbox = TRUE),content_type_json() )
+assert_that(r$status_code == 200L)
+```
+
+
+## Get the data elements
+
+- Lets load some data elements from the WHO TB Program.
+
+```{r echo = TRUE,results = 'hide'}
+des<-read.csv("https://extranet.who.int/tme/generateCSV.asp?ds=dictionary")
+
+```
+
+- Data element names are restricted to 230 characters and they need to be unique
+- So, lets test for that. 
+
+```{r echo = TRUE}
+des$name<-substring(des$definition,0,230)
+#Check and be sure that no names are duplicated.
+assert_that(Reduce("&",duplicated(des$name)) == FALSE)
+```
+
+- Certain fields like `name`,`shortName`,`aggregationType` and `valueType` are required.
+- Be sure to consult `api/schemas/` endpoint for the details.
+
+## Loading the data elements
+
+```{r echo = TRUE}
+#Data elements
+set.seed(94005004)
+des_import<-data.frame(name=des$name
+                       ,code=des$variable_name
+                       ,shortName=des$variable_name,
+                       aggregationType="SUM",
+                       valueType="NUMBER",
+                       domainType="AGGREGATE")
+des_import$id<-sapply(rep(11,nrow(des_import)),generateUID)
+url<-paste0(baseurl,"api/27/metadata?importStrategy=CREATE")
+#Post to the metadata API as JSON
+r<-POST(url,body=toJSON(list(dataElements = des_import),
+                        auto_unbox = TRUE),
+                        content_type_json())
+#assert_that(fromJSON(content(r,"text"))$stats$created == nrow(des))
+```
+- We create all of the required fields. 
+- Consult `api/schemas/dataElement` for details. 
+- Ensure require fields are present. 
+- Its useful to pre-generate UIDs.
+
+## Data element groups
+
+- Our file looks like it has some data elemnent groups. 
+- We parse these out and create a JSON object and import that. 
+
+```{r echo=TRUE}
+#Get the groups and assign some UIDs.
+de_groups<-data.frame(name=unique(des$dataset))
+de_groups$id<-sapply(rep(11,nrow(de_groups)),generateUID)
+
+#Lets create a map of data elements and which data element groups they belong to
+foo<-merge(des[,c("variable_name","dataset")],
+           des_import[,c("code","id")],
+           by.x="variable_name",by.y="code")
+
+```
+
+- Assign each data element to the appropriate group
+
+```{r echo=FALSE}
+#Assign all of the data elements to their respective group.
+de_groups_list<-list()
+for (i in 1:nrow(de_groups)) {
+  de_group<-list(name = de_groups$name[i], id = de_groups$id[i])
+  des_in_group<-foo[foo$dataset == de_groups$name[i],c("id")]
+  des_group_list<-list()  
+  for ( j in 1:length(des_in_group)) {
+      des_group_list<-list.append(  des_group_list,list(id = des_in_group[j] ))
+    }
+ de_group$dataElements<-des_group_list 
+ de_groups_list<-list.append(de_groups_list,de_group)
+}
+
+#Post to the metadata API as JSON
+url<-paste0(baseurl,"api/27/metadata?importStrategy=CREATE")
+r<-POST(url,body=toJSON(list(dataElementGroups = de_groups_list),auto_unbox = TRUE),content_type_json())
+#assert_that(fromJSON(content(r,"text"))$stats$created == nrow(de_groups))
+
+```
+
+> `r substring(toJSON(de_groups_list),0,150)`
+
+- Post to the metadata API as JSON like the othe metadata
+
+## Transforming and importing the data
+
+- Lets get TB estimates and case notifications from WHO
+
+```{r echo=TRUE }
+
+tb<-read.csv("https://extranet.who.int/tme/generateCSV.asp?ds=estimates",
+             stringsAsFactors=FALSE)
+tb_cases<-read.csv("https://extranet.who.int/tme/generateCSV.asp?ds=notifications",
+                   stringsAsFactors = FALSE)
+knitr::kable(tb[1:2,c("iso3","year","e_pop_num","e_inc_100k")])
+```
+
+- The data is in `wide` format, and we need to have it in `long` format
+- `Long` format means we need a single data element/period/organisation unit combination on a single row.
+- Removing `NULLS` will make things faster
+- Merge the two data frames
+
+```{r echo=TRUE}
+tb<-reshape2::melt(tb,id.vars=c("country","iso2","iso3","iso_numeric",
+                                "g_whoregion","year"))
+tb<-tb[!is.na(tb$value),]
+tb_cases<-reshape2::melt(tb_cases,id.vars=c("country","iso2","iso3",
+                                            "iso_numeric","g_whoregion","year"))
+tb_cases<-tb_cases[!is.na(tb_cases$value),]
+tb<-rbind(tb,tb_cases)
+knitr::kable(tb_cases[1:2,])
+
+```
+
+
+## Merging it with the organisation units
+
+- Now the data is in so called `long`format
+- Lets merge (*INNER JOIN*) with the list of countries we loaded earlier.
+
+```{r echo=TRUE}
+tb<-merge(tb,des_import[,c("code","id")],by.x="variable",by.y="code")
+knitr::kable(tb[1:2,])
+```
+
+- And, we can ask the server for the organisation units, and merge these as well. 
+
+```{r echo = TRUE }
+#We need to get the Country codes
+r <- GET(paste0(baseurl,"api/27/organisationUnits?paging=false&filter=level:eq:3&fields=id,code"))
+r<- httr::content(r, "text")
+ous<-jsonlite::fromJSON(r,flatten=TRUE)$organisationUnits
+names(ous)<-c("ou_code","ou_id")
+#Merge/INNER JOIN the OUs with the data
+tb<-merge(tb,ous,by.x="iso3",by.y="ou_code")
+knitr::kable(tb[1:2,])
+```
+
+
+## Fine tuning prior to import
+
+- We only need certain columns. Consult the [docs](https://docs.dhis2.org/master/en/developer/html/webapi_data_values.html#webapi_sending_data_values)
+- Remove `NULL` values
+- Data values should be converted to characters. 
+
+```{r echo = TRUE }
+tb_out<-tb[,c("id","year","ou_id","value")]
+tb_out<-tb_out[!is.na(tb_out$value),]
+tb_out<-plyr::colwise(as.character)(tb_out)
+names(tb_out)<-c("dataElement","period","orgUnit","value")
+knitr::kable(head(tb_out))
+```
+
+
+## Data import and analytics
+
+- After getting the data into shape, import it and trigger analytics.
+
+```{r echo = TRUE}
+#Import the data, skipping checks for existing values
+url<-paste0(baseurl,"api/27/dataValueSets?preheatCache=true&skipExistingCheck=true")
+r<-POST(url,body=toJSON(list(dataValues = tb_out),auto_unbox = TRUE),content_type_json())
+#Lets trigger analytics
+url<-paste0(baseurl,"api/27/resourceTables/analytics")
+r<-POST(url)
+```
+
+```{r echo = FALSE, results = 'hide' }
+completed<-FALSE
+while ( completed == FALSE ) { 
+  Sys.sleep(10)
+  r<-fromJSON(content(GET(paste0(baseurl,"api/system/tasks/ANALYTICSTABLE_UPDATE")),"text"),Encoding("UTF-8"),flatten = TRUE)
+  cat("Not done yet...please wait.")
+  completed <- r[[1]]$completed }
+```
+
+
+## What did we end up with?
+
+- Lets compare *Total of new and relapse cases and cases with unknown previous TB treatment history* between South Africa and Sierra Leone.
+
+```{r echo = TRUE}
+
+#Period dimensions
+start_year<-min(unique(tb_cases[tb_cases$variable == "c_newinc",c("year")]))
+end_year<-max(unique(tb_cases[tb_cases$variable == "c_newinc",c("year")]))
+years<-paste(seq(start_year,end_year),sep="",collapse=";")
+#Data element dimension
+c_newinc<-fromJSON(content(GET(paste0(baseurl,"api/dataElements?filter=code:eq:c_newinc&fields=[id,name]")),"text"))$dataElements$id
+#Orgunit dimension
+sa<-fromJSON(content(GET(paste0(baseurl,
+                          "api/organisationUnits?filter=name:eq:South%20Africa&fields=[id,name]")),
+                     "text"))$organisationUnits$id
+sl<-fromJSON(content(GET(paste0(baseurl,
+                          "api/organisationUnits?filter=name:eq:Sierra%20Leone&fields=[id,name]")),
+                     "text"))$organisationUnits$id
+#Assemble the URL
+url<-paste0(baseurl,"api/27/analytics.json?")
+url<-paste0(url,"dimension=ou:",sa,";",sl)
+url<-paste0(url,"&dimension=pe:",years)
+url<-paste0(url,"&filter=dx:",c_newinc)
+url<-paste0(url,"&displayProperty=NAME&skipMeta=false")
+data<-fromJSON(content(GET(url),"text"))
+#We need to munge the data a bit to get it into a suitable form.
+metadata<-do.call(rbind,lapply(data$metaData$items,
+                               data.frame,stringsAsFactors=FALSE))
+metadata$from<-row.names(metadata)
+this_data<-data.frame(data$rows)
+names(this_data)<-data$headers$name
+this_data$ou<-plyr::mapvalues(this_data$ou,metadata$from,
+                              metadata$name,warn_missing=FALSE)
+this_data$value<-as.numeric(as.character(this_data$value))/1000
+```
+
+
+## Lets look at the data
+
+```{r echo = TRUE }
+#And, create the graph
+g <- ggplot(data=this_data,aes(x=pe,y=value,group=ou, color=ou)) 
+g <- g + geom_line() 
+g <- g + geom_point()
+g <- g +ggtitle("Reported TB cases in Sierra Leone and South Africa") 
+g <- g + labs(x = "Year", y = "Number of cases (thousands)",fill = NULL)
+g <- g + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+g
+```
+
+- Bootstrap completed in `r format(difftime(Sys.time(),startTime),units="mins")`
+
+
+
+
+## Summary
+- Summary goes here. 
