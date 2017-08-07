@@ -15,7 +15,7 @@ knitr::opts_chunk$set(echo = FALSE)
 
 ## Introduction
 - In general, bootstrapping usually refers to a self-starting process that is supposed to proceed without external input.[^1]
-- When initally setting up a DHIS2 system, we often need to transform and import (meta)data from external data sources.
+- When initially setting up a DHIS2 system, we often need to transform and import (meta)data from external data sources.
 - This process should be scripted, repeatable, and testable. 
 
 
@@ -29,7 +29,7 @@ knitr::opts_chunk$set(echo = FALSE)
 - Node.JS: Great tool for those who already know JavaScript.
 - ETL tools (Pentaho, Talend, etc) 
 - Bash 
-- SQL: May be useful for transforming large datasets or if you know SQL.
+- SQL: May be useful for transforming large data sets or if you know SQL.
 - Most important consideration is to choose the right tool for the task.
 
 
@@ -42,7 +42,7 @@ knitr::opts_chunk$set(echo = FALSE)
 ## Goal for this excercise
 -  Bootstrap a DHIS2 system with Global TB data in under 2 minutes and 30 seconds!
 -  If you do not know R, don't worry. Focus on **WHAT** is happening and how you could do it.
--  Do not forget about repetability and testability.
+-  Do not forget about reputability and testability.
 - Download and install R and Rstudio if you would like to follow along or repeat the bootstrap.
 
 
@@ -146,7 +146,7 @@ ous_from_server<-fromJSON(content(GET(url),"text"))
 ```
 
 - We should have our organisation units in now. 
-- Lets be sure that they are acutally there by asking the API for them and testing against out file.
+- Lets be sure that they are actually there by asking the API for them and testing against out file.
 
 ``` {r echo = TRUE }
 assert_that(all.equal(sort(ous$organisationUnits$id) , 
@@ -242,7 +242,7 @@ r<-POST(url,body=toJSON(list(dataElements = des_import),
 
 ## Data element groups
 
-- Our file looks like it has some data elemnent groups. 
+- Our file looks like it has some data element groups. 
 - We parse these out and create a JSON object and import that. 
 
 ```{r echo=TRUE}
@@ -282,7 +282,7 @@ r<-POST(url,body=toJSON(list(dataElementGroups = de_groups_list),auto_unbox = TR
 
 > `r substring(toJSON(de_groups_list),0,150)`
 
-- Post to the metadata API as JSON like the othe metadata
+- Post to the metadata API as JSON like the other metadata
 
 ## Transforming and importing the data
 
@@ -430,7 +430,7 @@ g
 
 - Bootstrap completed in `r format(difftime(Sys.time(),startTime),units="mins")`
 
-
+ 
 
 
 ## Summary
