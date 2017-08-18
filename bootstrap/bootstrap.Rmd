@@ -139,7 +139,7 @@ generateUID <- function(codeSize = 11) {
 
 startTime<-Sys.time()
 
-baseurl<-"http://localhost:8080/dhis/"
+baseurl<-"http://localhost:8085/"
 username<-"admin"
 password<-"district"
 #This will give us a cookie we can use for later use. 
