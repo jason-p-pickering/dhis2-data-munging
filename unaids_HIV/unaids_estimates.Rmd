@@ -1,0 +1,227 @@
+---
+title: "Data import into DHIS2"
+author: "Jason Pickering"
+date: "August 6, 2017"
+output:
+  slidy_presentation: default
+  ioslides_presentation: default
+  beamer_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+## Set your login credentials and server
+
+- You may need to change the following to suit your environment. 
+- Set the `root.dir` variable to the GitHub directory for this project is. 
+- Change `baseurl` to point to where your installation of DHIS2 is running. 
+- Change `username` and `district` to suit your DHIS2 installation.
+
+
+```{r , echo = TRUE, results='hold',message=FALSE}
+
+knitr::opts_knit$set(root.dir= "/home/jason/development/dhis2-data-munging/")
+baseurl<-"http://localhost:8080/dhis/"
+username<-"admin"
+password<-"district"
+
+```
+
+
+## Load some libraries and login to DHIS2
+
+```{r , echo = FALSE, results='hold',message=FALSE}
+require(httr)
+require(jsonlite)
+require(assertthat)
+require(rlist)
+require(reshape2)
+require(plyr)
+require(tidyjson)
+require(listviewer)
+generateUID <- function(codeSize = 11) {
+  #Generate a random seed
+  runif(1)
+  allowedLetters <- c(LETTERS, letters)
+  allowedChars <- c(LETTERS, letters, 0:9)
+  #First character must be a letter according to the DHIS2 spec
+  firstChar <- sample(allowedLetters, 1)
+  otherChars <- sample(allowedChars, codeSize - 1)
+  uid <- paste(c(firstChar,paste(
+    otherChars, sep = "", collapse = "" )), sep = "", collapse = "")
+  return(uid)
+}
+#This will give us a cookie we can use for later use. 
+
+loginDHIS2<-function(baseurl,username,password) {
+  url<-paste0(baseurl,"api/me")
+  r<-GET(url,authenticate(username,password))
+  assert_that(r$status_code == 200L) }
+
+loginDHIS2(baseurl,username,password)
+
+
+```
+
+
+## Loading the data
+
+- Get the data from the UNAIDS website
+- It took some time to reverse engineer the API for this website, but use this as a guide. 
+- We will assemble a request for the `http://aidsinfo.unaids.org/` site and parse this data into a data frame.
+
+
+```{r}
+
+body <- list("reqObj[TabStatus]" = "world", 
+             "reqObj[Group_Name]" = "People living with HIV", 
+             "reqObj[Display_Name]" = "Number of people living with HIV",
+            "reqObj[TimePeriod]" = "2016",
+            "reqObj[Area_Level]" = "2")
+url<-"http://aidsinfo.unaids.org/datasheetdatarequest"
+r <- POST(url, body = body, encode = "form")
+d<-fromJSON(content(r,"text"))
+r %>% content(.,"text") %>% jsonedit(mode = "code")
+
+```
+
+
+## Loading the data
+
+- We have to spend a bit of time to look at the response format, but it seems to be a JSON object which we will need to reconstruct into a flat table. 
+- Create two tables for the year and country
+- Unnest the data contained within the array. 
+- There are better ways to do this. :) 
+
+```{r}
+
+d_all<-data.frame()
+#Loop through the nested data frames
+for ( i in 1:length(d$tableData$Data_Val ) ) {
+foo<-data.frame(d$tableData$Data_Val[[i]],stringsAsFactors = FALSE)
+names(foo)<-as.vector(t(d$MultiSubgroups))
+foo$country<-d$tableData$Area_Name[[i]]
+foo$year<-d$tableYear
+d_all<-rbind(d_all,foo)
+}
+
+knitr::kable(head(d_all))
+```
+
+
+## More data cleanup
+
+- Lets only get the middle estimates, ignoring the lower and upper estimates. 
+- Lets round these numbers to the nearest integer.
+- Remove any "NA" or **NULL** values. They will not be imported.
+
+```{r echo=TRUE, messages=FALSE}
+d<-d_all[,c("All ages estimate","country","year")]
+names(d)<-c("value","orgUnit","period")
+d<-d[!is.na(d$value),]
+d$value<-round(as.numeric(d$value))
+knitr::kable(head(d))
+```
+
+
+
+## Matching the orgunits from DHIS2
+
+
+- Get a listing of countries from DHIS2. We will need to match these with our data. 
+- Convert the country names in the data file back to a character (instead of a factor) so that we can use this column to join the OU listing from DHIS2 with it. 
+
+```{r}
+r <- GET(paste0(baseurl,"api/27/organisationUnits?paging=false&filter=level:eq:3&fields=id,name"))
+r<- httr::content(r, "text")
+ous<-jsonlite::fromJSON(r,flatten=TRUE)$organisationUnits
+names(ous)<-c("ou_name","ou_id")
+d$orgUnit<-as.character(d$orgUnit)
+#Now, we need to try and merge the OUs from DHIS2 with the OUs from the CSV file. 
+#This will be similar to a "left join" as we will keep all of the 
+```
+
+
+- Very likely, this is not going to match, so let's try to first perform a **LEFT JOIN** on the data. 
+- This will keep all of the countries, even if there is not a match from DHIS2. 
+
+
+```{r}
+
+d_merged<-merge(d,ous,by.x="orgUnit",by.y="ou_name",all.x=TRUE)
+unique(d_merged[is.na(d_merged$ou_id),"orgUnit"])
+```
+
+
+- So, we see we have a number of countries which do not match. 
+- We can define a mapping to convert the names in the data file to the names in DHIS2.
+- We are still going to be missing a few countries (like South Sudan ) but our hierarchy does not have this country, so we will just have to ignore it. 
+
+
+```{r}
+from<-c("Bolivia (Plurinational State of)",
+"Cabo Verde","Côte d'Ivoire","Democratic People's Republic of Korea",
+"Myanmar","Republic of Korea",
+"Russian Federation","South Sudan",
+"Venezuela (Bolivarian Republic of)")
+to<-c("Bolivia","Cape Verde","Cote d'Ivoire","Korea, Democratic People's Republic of",
+      "Burma","Korea, Republic of","Russia","South Sudan","Venezuela")
+knitr::kable(data.frame(from,to))
+```
+
+- The mapping looks OK, so lets reassign the names.
+- This time we will perform an **INNER JOIN** and discard any data which does not have a matching country in DHIS2. 
+
+```{r}
+d$orgUnit<-plyr::mapvalues(d$orgUnit,from,to,warn_missing = FALSE)
+d_merged<-merge(d,ous,by.x="orgUnit",by.y="ou_name")
+d_merged<-d_merged[,c("ou_id","period","value")]
+names(d_merged)<-c("orgUnit","period","value")
+```
+
+
+
+
+## Create a new data element for the data
+
+- We will need to create a new data element for the data in the system.
+
+```{r}
+de_name<-"NUMBER OF PEOPLE LIVING WITH HIV"
+set.seed(587838)
+this_id<-generateUID()
+des_import<-data.frame(name=de_name
+                       ,shortName=de_name,
+                       aggregationType="SUM",
+                       valueType="NUMBER",
+                       domainType="AGGREGATE",
+                       id=this_id)
+
+url<-paste0(baseurl,"api/27/metadata?importStrategy=CREATE")
+#Post to the metadata API as JSON
+r<-POST(url,body=toJSON(list(dataElements = des_import),
+                        auto_unbox = TRUE),
+        content_type_json())
+```
+
+
+- We get the data prepared to import into DHIS2. 
+- Set all of the property names according to those used in the documentation. 
+- Upload to DHIS2 and hope that it works.
+- Finally, trigger analytics.
+
+```{r}
+
+d_merged$dataElement=this_id
+d_merged<-plyr::colwise(as.character)(d_merged)
+
+url<-paste0(baseurl,"api/27/dataValueSets?preheatCache=true")
+r<-POST(url,body=toJSON(list(dataValues = d_merged),auto_unbox = TRUE),content_type_json())
+#Lets trigger analytics
+url<-paste0(baseurl,"api/27/resourceTables/analytics")
+r<-POST(url)
+
+```
